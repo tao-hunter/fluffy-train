@@ -90,6 +90,8 @@ If you see **distorted shapes**, that usually means the synthesized views halluc
 - **Increase 3D detail (slower)**:
   - `TRELLIS_SPARSE_STRUCTURE_STEPS`, `TRELLIS_SLAT_STEPS` (more steps = more detail, slower)
   - `TRELLIS_NUM_OVERSAMPLES` (helps stability/detail, increases compute)
+- **Preserve thin details (text, beams, straps) during background removal**:
+  - If fine details disappear, try lowering `RMBG_MASK_THRESHOLD` (e.g. `0.6`) and/or increasing `PADDING_PERCENTAGE` (e.g. `0.3`).
 
 ### Per-request overrides (JSON)
 You can override the multi-view strategy per request to A/B test quickly:

@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     output_image_size: tuple[int, int] = Field(default=(518, 518), env="OUTPUT_IMAGE_SIZE") # (height, width)
     padding_percentage: float = Field(default=0.2, env="PADDING_PERCENTAGE")
     limit_padding: bool = Field(default=True, env="LIMIT_PADDING")
+    rmbg_mask_threshold: float = Field(
+        default=0.8,
+        env="RMBG_MASK_THRESHOLD",
+        description="Foreground threshold used for bbox/cropping. Lower helps keep thin details (e.g. text, beams) but may include more background.",
+    )
 
     # ReconViaGen settings
     use_reconviagen: bool = Field(default=True, env="USE_RECONVIAGEN", description="Use ReconViaGen instead of standard Trellis")
