@@ -147,7 +147,8 @@ async def get_setup_info() -> dict:
         dict: Pipeline configuration settings
     """
     try:
-        return settings.dict()
+        # Avoid leaking secrets (HF_TOKEN)
+        return settings.model_dump(exclude={"hf_token"})
     except Exception as e:
         logger.error(f"Failed to get setup info: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve configuration")

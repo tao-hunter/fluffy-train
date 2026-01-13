@@ -108,12 +108,12 @@ def save_image(image: Image.Image, folder: str, prefix: str, timestamp: str) -> 
 def save_files(
     trellis_result: Optional[TrellisResult], 
     input_image: Image.Image,
-    image_edited_1: Image.Image, 
-    image_without_background_1: Image.Image,
-    image_edited_2: Image.Image,
-    image_without_background_2: Image.Image,
-    image_edited_3: Image.Image,
-    image_without_background_3: Image.Image
+    image_edited_1: Optional[Image.Image], 
+    image_without_background_1: Optional[Image.Image],
+    image_edited_2: Optional[Image.Image],
+    image_without_background_2: Optional[Image.Image],
+    image_edited_3: Optional[Image.Image],
+    image_without_background_3: Optional[Image.Image]
 ) -> None:
     """
     Save the generated files to the output directory.
@@ -131,10 +131,16 @@ def save_files(
     # Save all images using PIL Image.save() with timestamp
     timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
     save_image(input_image, "png", "input_original", timestamp)
-    save_image(image_edited_1, "png", "image_edited_left_view", timestamp)
-    save_image(image_without_background_1, "png", "image_no_bg_left_view", timestamp)
-    save_image(image_edited_2, "png", "image_edited_right_view", timestamp)
-    save_image(image_without_background_2, "png", "image_no_bg_right_view", timestamp)
-    save_image(image_edited_3, "png", "image_edited_back_view", timestamp)
-    save_image(image_without_background_3, "png", "image_no_bg_back_view", timestamp)
+    if image_edited_1 is not None:
+        save_image(image_edited_1, "png", "image_edited_view_1", timestamp)
+    if image_without_background_1 is not None:
+        save_image(image_without_background_1, "png", "image_no_bg_view_1", timestamp)
+    if image_edited_2 is not None:
+        save_image(image_edited_2, "png", "image_edited_view_2", timestamp)
+    if image_without_background_2 is not None:
+        save_image(image_without_background_2, "png", "image_no_bg_view_2", timestamp)
+    if image_edited_3 is not None:
+        save_image(image_edited_3, "png", "image_edited_view_3", timestamp)
+    if image_without_background_3 is not None:
+        save_image(image_without_background_3, "png", "image_no_bg_view_3", timestamp)
 

@@ -41,6 +41,73 @@ class BackgroundRemovalService:
         # Set normalize
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
        
+    def _center_square_resize(self, image: Image.Image) -> Image.Image:
+        """
+        Fallback: center-crop to square and resize to configured output size.
+        Keeps downstream geometry stable even if segmentation fails.
+        """
+        rgb = image.convert("RGB")
+        w, h = rgb.size
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        cropped = rgb.crop((left, top, left + side, top + side))
+        # output_image_size is (height, width)
+        return cropped.resize((self.output_size[1], self.output_size[0]), Image.Resampling.LANCZOS)
+
+    def _crop_from_mask_and_resize(self, rgba_tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Crop RGBA tensor around mask and resize to output size.
+
+        Args:
+            rgba_tensor: (4, H, W)
+            mask: (H, W) in [0, 1]
+
+        Returns:
+            (4, out_h, out_w)
+        """
+        bbox_indices = torch.argwhere(mask > 0.8)  # (N, 2) of (y, x)
+        H, W = mask.shape
+
+        if bbox_indices.numel() == 0:
+            # No foreground found: center-crop full image to square
+            side = min(H, W)
+            top = (H - side) // 2
+            left = (W - side) // 2
+            crop_args = dict(top=int(top), left=int(left), height=int(side), width=int(side))
+            return resized_crop(rgba_tensor, **crop_args, size=self.output_size, antialias=False)
+
+        y_min, y_max = torch.aminmax(bbox_indices[:, 0])
+        x_min, x_max = torch.aminmax(bbox_indices[:, 1])
+
+        width = (x_max - x_min).item()
+        height = (y_max - y_min).item()
+        cy = (y_max + y_min).item() / 2.0
+        cx = (x_max + x_min).item() / 2.0
+
+        size = max(width, height)
+        size = int(size * (1.0 + self.padding_percentage))
+        size = max(1, size)
+
+        top = int(cy - size // 2)
+        left = int(cx - size // 2)
+        bottom = int(cy + size // 2)
+        right = int(cx + size // 2)
+
+        if self.limit_padding:
+            top = max(0, top)
+            left = max(0, left)
+            bottom = min(H, bottom)
+            right = min(W, right)
+
+        crop_args = dict(
+            top=int(top),
+            left=int(left),
+            height=int(max(1, bottom - top)),
+            width=int(max(1, right - left)),
+        )
+        return resized_crop(rgba_tensor, **crop_args, size=self.output_size, antialias=False)
+
     async def startup(self) -> None:
         """
         Startup the BackgroundRemovalService.
@@ -78,6 +145,7 @@ class BackgroundRemovalService:
         Remove the background from the image.
         """
         try:
+            self.ensure_ready()
             t1 = time.time()
             # Check if the image has alpha channel
             has_alpha = False
@@ -89,8 +157,16 @@ class BackgroundRemovalService:
                     has_alpha=True
             
             if has_alpha:
-                # If the image has alpha channel, return the image
-                output = image
+                # Use alpha as a mask, crop + resize to standard output size
+                rgba = np.array(image)
+                alpha = rgba[:, :, 3].astype(np.float32) / 255.0  # (H, W)
+                mask = torch.from_numpy(alpha).to(self.device).clamp(0, 1)
+
+                rgb_image = image.convert("RGB")
+                rgb_tensor = self.transforms(rgb_image).to(self.device)  # (3, H, W)
+                rgba_tensor = torch.cat([rgb_tensor * mask.unsqueeze(0), mask.unsqueeze(0)], dim=0)  # (4,H,W)
+                out_rgba = self._crop_from_mask_and_resize(rgba_tensor, mask)
+                image_without_background = to_pil_image(out_rgba[:3].clamp(0, 1))
                 
             else:
                 # PIL.Image (H, W, C) C=3
@@ -109,7 +185,10 @@ class BackgroundRemovalService:
             
         except Exception as e:
             logger.error(f"Error removing background: {e}")
-            return image 
+            try:
+                return self._center_square_resize(image)
+            except Exception:
+                return image 
 
     def _remove_background(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -121,42 +200,10 @@ class BackgroundRemovalService:
         with torch.no_grad():
             # Get mask from model (1, 1, H, W)
             preds = self.model(input_tensor)[-1].sigmoid()
-            # Reshape and quantize mask values: (1, 1, H, W) -> (1, H, W) -> (H, W)
-            mask = preds[0].squeeze().mul_(255).int().div(255).float()
+            # Reshape mask values: (1, 1, H, W) -> (H, W)
+            mask = preds[0].squeeze().clamp(0, 1).float()
 
-        # Get bounding box indices
-        bbox_indices = torch.argwhere(mask > 0.8)
-        if len(bbox_indices) == 0:
-            crop_args = dict(top = 0, left = 0, height = mask.shape[1], width = mask.shape[0])
-        else:
-            h_min, h_max = torch.aminmax(bbox_indices[:, 1])
-            w_min, w_max = torch.aminmax(bbox_indices[:, 0])
-            width, height = w_max - w_min, h_max - h_min
-            center =  (h_max + h_min) / 2, (w_max + w_min) / 2
-            size = max(width, height)
-            padded_size_factor = 1 + self.padding_percentage
-            size = int(size * padded_size_factor)
-            top = int(center[1] - size // 2)
-            left = int(center[0] - size // 2)
-            bottom = int(center[1] + size // 2)
-            right = int(center[0] + size // 2)
-
-            if self.limit_padding:
-                top = max(0, top)
-                left = max(0, left)
-                bottom = min(mask.shape[1], bottom)
-                right = min(mask.shape[0], right)
-
-            crop_args = dict(
-                top=top,
-                left=left,
-                height=bottom - top,
-                width=right - left
-            )
-
-            mask = mask.unsqueeze(0)
-            # Concat mask with image and blacken the background: (C=3, H, W) | (1, H, W) -> (C=4, H, W)
-            tensor_rgba = torch.cat([image_tensor*mask, mask], dim=-3)
-            output = resized_crop(tensor_rgba, **crop_args, size = self.output_size, antialias=False)
-            return output
+        # Concat mask with image and blacken the background: (C=3, H, W) | (1, H, W) -> (C=4, H, W)
+        tensor_rgba = torch.cat([image_tensor * mask.unsqueeze(0), mask.unsqueeze(0)], dim=0)
+        return self._crop_from_mask_and_resize(tensor_rgba, mask)
 

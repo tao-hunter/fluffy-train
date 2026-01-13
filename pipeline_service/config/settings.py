@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     num_inference_steps: int = Field(default=4, env="NUM_INFERENCE_STEPS")
     true_cfg_scale: float = Field(default=1.0, env="TRUE_CFG_SCALE")
     qwen_edit_prompt_path: Path = Field(default=config_dir.joinpath("qwen_edit_prompt.json"), env="QWEN_EDIT_PROMPT_PATH")
+    qwen_view_prompts_path: Path = Field(default=config_dir.joinpath("qwen_view_prompts.json"), env="QWEN_VIEW_PROMPTS_PATH")
+
+    # Multi-view strategy (quality vs hallucination)
+    use_qwen_views: bool = Field(default=True, env="USE_QWEN_VIEWS")
+    include_original_view: bool = Field(default=True, env="INCLUDE_ORIGINAL_VIEW")
+    # Env example: '["front_view","side_view","back_view"]'
+    qwen_view_keys: list[str] = Field(default_factory=lambda: ["side_view", "back_view"], env="QWEN_VIEW_KEYS")
 
     # Backgorund removal settings
     background_removal_model_id: str = Field(default="ZhengPeng7/BiRefNet", env="BACKGROUND_REMOVAL_MODEL_ID")

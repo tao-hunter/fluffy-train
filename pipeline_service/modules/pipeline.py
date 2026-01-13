@@ -3,8 +3,8 @@ from __future__ import annotations
 import base64
 import io
 import time
-from datetime import datetime
 from typing import Optional
+import json
 
 from PIL import Image
 import pyspz
@@ -42,6 +42,20 @@ class GenerationPipeline:
         self.rmbg = BackgroundRemovalService(settings)
         self.trellis = TrellisService(settings)
         self.reconviagen = ReconViaGenManager(settings)
+
+    def _load_qwen_view_prompts(self) -> dict:
+        """
+        Load multi-view prompts from config.
+        Expected format: { "<view_key>": { "positive": "..." } }
+        """
+        try:
+            path = self.settings.qwen_view_prompts_path
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.warning(f"Failed to load qwen view prompts: {e}")
+        return {}
 
     async def startup(self) -> None:
         """Initialize all pipeline components."""
@@ -148,31 +162,58 @@ class GenerationPipeline:
         # Decode input image
         image = decode_image(request.prompt_image)
 
-        # 1. Edit the image using Qwen Edit
-        image_edited = self.qwen_edit.edit_image(
-            prompt_image=image,
-            seed=request.seed,
-            prompt="Show this object in left three-quarters view and make sure it is fully visible. Turn background neutral solid color contrasting with an object. Delete background details. Delete watermarks. Keep object colors. Sharpen image details",
+        # ---- Multi-view image preparation (quality-critical) ----
+        # Default strategy: include original view (less hallucination) + a couple synthesized views (more coverage)
+        use_qwen_views = request.use_qwen_views if request.use_qwen_views is not None else self.settings.use_qwen_views
+        include_original_view = (
+            request.include_original_view if request.include_original_view is not None else self.settings.include_original_view
         )
+        view_keys = request.qwen_view_keys if request.qwen_view_keys is not None else self.settings.qwen_view_keys
 
-        # 2. Remove background
-        image_without_background = self.rmbg.remove_background(image_edited)
+        view_prompts = self._load_qwen_view_prompts()
 
-        # add another view of the image
-        image_edited_2 = self.qwen_edit.edit_image(
-            prompt_image=image,
-            seed=request.seed,
-            prompt="Show this object in right three-quarters view and make sure it is fully visible. Turn background neutral solid color contrasting with an object. Delete background details. Delete watermarks. Keep object colors. Sharpen image details",
-        )
-        image_without_background_2 = self.rmbg.remove_background(image_edited_2)
+        images_for_3d: list[Image.Image] = []
+        # Always compute bg-removed original (even if we don't include it) because it's a good fallback
+        image_without_background_original = self.rmbg.remove_background(image)
+        if include_original_view:
+            images_for_3d.append(image_without_background_original)
 
-        # add another view of the image
-        image_edited_3 = self.qwen_edit.edit_image(
-            prompt_image=image,
-            seed=request.seed,
-            prompt="Show this object in back view and make sure it is fully visible. Turn background neutral solid color contrasting with an object. Delete background details. Delete watermarks. Keep object colors. Sharpen image details",
-        )
-        image_without_background_3 = self.rmbg.remove_background(image_edited_3)
+        edited_images: list[Image.Image] = []
+        edited_no_bg_images: list[Image.Image] = []
+
+        if use_qwen_views:
+            for key in view_keys:
+                prompt_obj = view_prompts.get(key, {})
+                prompt = None
+                if isinstance(prompt_obj, dict):
+                    prompt = prompt_obj.get("positive")
+                elif isinstance(prompt_obj, str):
+                    prompt = prompt_obj
+
+                if not prompt:
+                    logger.warning(f"Missing prompt for view '{key}', skipping")
+                    continue
+
+                img_edit = self.qwen_edit.edit_image(
+                    prompt_image=image,
+                    seed=request.seed,
+                    prompt=prompt,
+                )
+                img_no_bg = self.rmbg.remove_background(img_edit)
+                edited_images.append(img_edit)
+                edited_no_bg_images.append(img_no_bg)
+                images_for_3d.append(img_no_bg)
+
+        if not images_for_3d:
+            images_for_3d = [image_without_background_original]
+
+        # Keep backward-compatible debug saving (up to 3 synthesized views)
+        image_edited = edited_images[0] if len(edited_images) > 0 else None
+        image_without_background = edited_no_bg_images[0] if len(edited_no_bg_images) > 0 else image_without_background_original
+        image_edited_2 = edited_images[1] if len(edited_images) > 1 else None
+        image_without_background_2 = edited_no_bg_images[1] if len(edited_no_bg_images) > 1 else None
+        image_edited_3 = edited_images[2] if len(edited_images) > 2 else None
+        image_without_background_3 = edited_no_bg_images[2] if len(edited_no_bg_images) > 2 else None
 
         # save to debug
         # image_edited.save("image_edited.png")
@@ -209,7 +250,7 @@ class GenerationPipeline:
             multiimage_algo = getattr(self.settings, 'reconviagen_multiimage_algo', 'multidiffusion')
             
             trellis_result = self.reconviagen.generate_multiview(
-                images=[image_without_background, image_without_background_2, image_without_background_3],
+                images=images_for_3d,
                 seed=request.seed,
                 ss_guidance_strength=ss_guidance_strength,
                 ss_sampling_steps=ss_sampling_steps,
@@ -221,7 +262,7 @@ class GenerationPipeline:
             logger.info("Using standard Trellis for multi-view 3D generation")
             trellis_result = self.trellis.generate(
                 TrellisRequest(
-                    images=[image_without_background, image_without_background_2, image_without_background_3],
+                    images=images_for_3d,
                     seed=request.seed,
                     params=trellis_params,
                 )
